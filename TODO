@@ -1,0 +1,3 @@
+- implement config parser
+- allow to keep dirs in ~, e.g. when using encrypted home
+- option to use tmpfs for TMPDIR?

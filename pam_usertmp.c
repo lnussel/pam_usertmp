@@ -64,7 +64,8 @@ exit 1
 #define _(x) (x)
 #endif
 
-const char* basepath = "/var/cache/users/";
+const char* basepath = "/var/cache/user/";
+const char* runbasepath = "/run/user/";
 
 static void parse_args(const char* type, int argc, const char **argv)
 {
@@ -81,12 +82,17 @@ static void parse_args(const char* type, int argc, const char **argv)
 	// TODO
 }
 
-static int get_uid(const char* name, uid_t* uid)
+static int get_uid(const char* name, uid_t* uid, gid_t* gid)
 {
 	struct passwd pwd;
 	struct passwd *result;
 	char *buf;
 	size_t buflen;
+
+	if (!strcmp(name, "root")) {
+		*uid = *gid = 0;
+		return 0;
+	}
 
 	buflen = sysconf(_SC_GETPW_R_SIZE_MAX);
 	if (buflen == -1)
@@ -100,6 +106,7 @@ static int get_uid(const char* name, uid_t* uid)
 		goto fail;
 
 	*uid = pwd.pw_uid;
+	*gid = pwd.pw_gid;
 	return 0;
 fail:
 	syslog(LOG_WARNING, "%s: failure in %s: %m", __FILE__, __FUNCTION__);
@@ -120,6 +127,14 @@ int install_d(const char* path, mode_t mode, uid_t uid, gid_t gid)
 	return 0;
 }
 
+static void sanitize(char* path)
+{
+	char* c;
+	for (c = path; *c; ++c)
+		if (*c == '/' || *c == ':')
+			*c = '_';
+}
+
 DLLEXPORT PAM_EXTERN
 int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **argv)
 {
@@ -128,7 +143,7 @@ int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **ar
 	const void* ptr;
 	const char* user;
 	uid_t uid;
-	char* c;
+	uid_t gid;
 	int ret = PAM_SUCCESS;
 	mode_t old_umask = umask(0);
 
@@ -140,7 +155,7 @@ int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **ar
 	else
 		user = ptr;
 
-	if (get_uid(user, &uid)) {
+	if (get_uid(user, &uid, &gid)) {
 		ret = PAM_IGNORE;
 		goto out;
 	}
@@ -152,12 +167,11 @@ int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **ar
 
 	strcpy(userpath, basepath);
 	strncat(userpath, user, sizeof(userpath)-strlen(basepath)-1);
-	// better safe than sorry, subsitute potential nasty characters
-	for (c = userpath+strlen(basepath); *c; ++c)
-		if (*c == '/' || *c == ':')
-			*c = '_';
 
-	if (install_d(userpath, 0700, uid, -1)) {
+	// better safe than sorry, subsitute potential nasty characters
+	sanitize(userpath+strlen(basepath));
+
+	if (install_d(userpath, 0700, uid, gid)) {
 		ret = PAM_IGNORE;
 		goto out;
 	}
@@ -165,29 +179,48 @@ int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **ar
 	strcpy(path, userpath);
 	strncat(path, "/tmp", sizeof(path)-strlen(basepath)-1);
 
-	if (install_d(path, 0700, uid, -1)) {
+	if (install_d(path, 0700, uid, gid)) {
 		ret = PAM_IGNORE;
 		goto out;
 	}
 
 	ret = pam_misc_setenv(pamh, "TMPDIR", path, 0);
 	if(ret != PAM_SUCCESS) {
-		 ret = PAM_IGNORE;
-		 goto out;
+		syslog(LOG_WARNING, "%s: failed to set TMPDIR: %m", __FILE__);
 	}
 
 	strcpy(path, userpath);
 	strncat(path, "/cache", sizeof(path)-strlen(basepath)-1);
 
-	if (install_d(path, 0700, uid, -1)) {
+	if (install_d(path, 0700, uid, gid)) {
 		ret = PAM_IGNORE;
 		goto out;
 	}
 
 	ret = pam_misc_setenv(pamh, "XDG_CACHE_HOME", path, 0);
 	if(ret != PAM_SUCCESS) {
-		 ret = PAM_IGNORE;
-		 goto out;
+		syslog(LOG_WARNING, "%s: failed to set XDG_CACHE_HOME: %m", __FILE__);
+	}
+
+	if (install_d(runbasepath, 0755, 0, 0)) {
+		ret = PAM_IGNORE;
+		goto out;
+	}
+
+	strcpy(path, runbasepath);
+	strncat(path, user, sizeof(path)-strlen(runbasepath)-1);
+
+	// better safe than sorry, subsitute potential nasty characters
+	sanitize(path+strlen(runbasepath));
+
+	if (install_d(path, 0700, uid, gid)) {
+		ret = PAM_IGNORE;
+		goto out;
+	}
+
+	ret = pam_misc_setenv(pamh, "XDG_RUNTIME_DIR", path, 0);
+	if(ret != PAM_SUCCESS) {
+		syslog(LOG_WARNING, "%s: failed to set XDG_RUNTIME_DIR: %m", __FILE__);
 	}
 
 out:
