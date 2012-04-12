@@ -64,7 +64,7 @@ exit 1
 #define _(x) (x)
 #endif
 
-const char* tmppath = "/var/cache/users/";
+const char* basepath = "/var/cache/users/";
 
 static void parse_args(const char* type, int argc, const char **argv)
 {
@@ -81,15 +81,56 @@ static void parse_args(const char* type, int argc, const char **argv)
 	// TODO
 }
 
+static int get_uid(const char* name, uid_t* uid)
+{
+	struct passwd pwd;
+	struct passwd *result;
+	char *buf;
+	size_t buflen;
+
+	buflen = sysconf(_SC_GETPW_R_SIZE_MAX);
+	if (buflen == -1)
+		buflen = 16384;
+	buf = alloca(buflen);
+	if (!buf)
+		goto fail;
+
+	getpwnam_r(name, &pwd, buf, buflen, &result);
+	if (!result)
+		goto fail;
+
+	*uid = pwd.pw_uid;
+	return 0;
+fail:
+	syslog(LOG_WARNING, "%s: failure in %s: %m", __FILE__, __FUNCTION__);
+	return -1;
+}
+
+int install_d(const char* path, mode_t mode, uid_t uid, gid_t gid)
+{
+	if (mkdir(path, mode) && errno != EEXIST) {
+		syslog(LOG_WARNING, "%s: mkdir(%s) failed: %m", __FILE__, path);
+		return -1;
+	}
+
+	if (chown(path, uid, gid)) {
+		syslog(LOG_WARNING, "%s: chown(%s) failed: %m", __FILE__, path);
+		return -1;
+	}
+	return 0;
+}
+
 DLLEXPORT PAM_EXTERN
 int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **argv)
 {
 	char path[PATH_MAX];
+	char userpath[PATH_MAX];
 	const void* ptr;
 	const char* user;
+	uid_t uid;
 	char* c;
 	int ret = PAM_SUCCESS;
-	mode_t old_umask;
+	mode_t old_umask = umask(0);
 
 	parse_args("session", argc, argv);
 
@@ -99,32 +140,52 @@ int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **ar
 	else
 		user = ptr;
 
-	strcpy(path, tmppath);
-	strncat(path, user, sizeof(path)-strlen(tmppath)-1);
-	// better safe than sorry, subsitute potential nasty characters
-	for (c = path+strlen(tmppath); *c; ++c)
-		if (*c == '/' || *c == ':')
-			*c = '_';
-
-	old_umask = umask(0);
-
-	if (mkdir(path, 0700) && errno != EEXIST) {
-		syslog(LOG_WARNING, "%s: mkdir(%s) failed: %m", __FILE__, path);
+	if (get_uid(user, &uid)) {
 		ret = PAM_IGNORE;
 		goto out;
 	}
 
-	strncat(path, "/tmp", sizeof(path)-strlen(tmppath)-1);
+	if (install_d(basepath, 0755, 0, 0)) {
+		ret = PAM_IGNORE;
+		goto out;
+	}
 
-	if (mkdir(path, 0700) && errno != EEXIST) {
-		syslog(LOG_WARNING, "%s: mkdir(%s) failed: %m", __FILE__, path);
+	strcpy(userpath, basepath);
+	strncat(userpath, user, sizeof(userpath)-strlen(basepath)-1);
+	// better safe than sorry, subsitute potential nasty characters
+	for (c = userpath+strlen(basepath); *c; ++c)
+		if (*c == '/' || *c == ':')
+			*c = '_';
+
+	if (install_d(userpath, 0700, uid, -1)) {
+		ret = PAM_IGNORE;
+		goto out;
+	}
+
+	strcpy(path, userpath);
+	strncat(path, "/tmp", sizeof(path)-strlen(basepath)-1);
+
+	if (install_d(path, 0700, uid, -1)) {
 		ret = PAM_IGNORE;
 		goto out;
 	}
 
 	ret = pam_misc_setenv(pamh, "TMPDIR", path, 0);
-	if(ret != PAM_SUCCESS)
-	{
+	if(ret != PAM_SUCCESS) {
+		 ret = PAM_IGNORE;
+		 goto out;
+	}
+
+	strcpy(path, userpath);
+	strncat(path, "/cache", sizeof(path)-strlen(basepath)-1);
+
+	if (install_d(path, 0700, uid, -1)) {
+		ret = PAM_IGNORE;
+		goto out;
+	}
+
+	ret = pam_misc_setenv(pamh, "XDG_CACHE_HOME", path, 0);
+	if(ret != PAM_SUCCESS) {
 		 ret = PAM_IGNORE;
 		 goto out;
 	}
@@ -132,4 +193,10 @@ int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **ar
 out:
 	umask(old_umask);
 	return ret;
+}
+
+DLLEXPORT PAM_EXTERN
+int pam_sm_close_session(pam_handle_t * pamh, int flags,int argc, const char **argv)
+{
+	return PAM_SUCCESS;
 }
