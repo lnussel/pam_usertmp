@@ -168,7 +168,7 @@ int pam_sm_open_session(pam_handle_t * pamh, int flags,int argc, const char **ar
 	strcpy(userpath, basepath);
 	strncat(userpath, user, sizeof(userpath)-strlen(basepath)-1);
 
-	// better safe than sorry, subsitute potential nasty characters
+	// better safe than sorry, substitute potential nasty characters
 	sanitize(userpath+strlen(basepath));
 
 	if (install_d(userpath, 0700, uid, gid)) {
